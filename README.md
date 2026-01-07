@@ -1,167 +1,124 @@
-# TVStreamer – Headless HDMI Screen Mirroring via Raspberry Pi
+# AutoVNC RPi1 (Linux → Raspberry Pi → HDMI)
 
-TVStreamer ist ein leichtgewichtiges Setup, um den **Bildschirm eines Linux-Laptops**
-automatisch über einen **Raspberry Pi (RPi 1)** per **HDMI auf einem Fernseher**
-anzuzeigen – **ohne Tastatur oder Maus am Raspberry Pi**.
+Dieses Projekt macht aus einem **Raspberry Pi 1** einen **VNC-Client**, der den Bildschirm eines **Linux Mint (oder allgemein Linux/X11) Laptops** automatisch auf **HDMI/TV** anzeigt.
 
-Die Konfiguration (WLAN, Ziel-IP, VNC-Optionen) erfolgt bequem über eine
-**Weboberfläche (HTTPS)**.
-
----
-
-## 🧩 Ziel & Motivation
-
-- Alte Raspberry-Pi-Hardware sinnvoll weiterverwenden
-- Kein Chromecast / Miracast nötig
-- Stabiler Dauerbetrieb (z. B. Präsentationen, Infodisplays)
-- Zentrale Konfiguration per Browser
-- Automatischer Start nach Reboot
+✅ Linux Laptop = **VNC Server** (x11vnc)  
+✅ Raspberry Pi 1 = **VNC Client** (vncviewer)  
+✅ Konfiguration per **WebUI (HTTPS)**: WLAN, VNC Host/Passwort, Startoptionen, **HDMI-Auflösung**
 
 ---
 
-## 🖥️ Systemübersicht & Kommunikation
+## Architektur
 
 ```
-                 (HTTPS)
-   +-------------------------------+
-   |           Webbrowser          |
-   |   Konfiguration (WebUI)       |
-   +---------------+---------------+
-                   |
-                   v
-+------------------+------------------+
-|           Raspberry Pi 1            |
-|------------------------------------|
-|  - WLAN Client                     |
-|  - LightDM + Openbox               |
-|  - VNC Client (Fullscreen)         |
-|  - WebUI (Flask)                   |
-|                                    |
-|  HDMI OUT --------------------+    |
-+------------------------------ | ---+
-                               |
-                               v
-                        +------+------
-                        |     TV      |
-                        |  HDMI IN    |
-                        +-------------
-
-        ^
-        |
-        |   (VNC)
-        |
-+-------+-----------------------------+
-|         Linux Laptop (Mint)          |
-|-------------------------------------|
-|  - VNC Server                        |
-|  - Desktop / Browser / Apps         |
-+-------------------------------------+
-```
-
-**Kurz erklärt:**  
-Der Raspberry Pi verbindet sich automatisch mit dem WLAN, startet eine minimale
-grafische Oberfläche und öffnet eine VNC-Verbindung zum Linux-Laptop. Das Bild
-wird per HDMI an den Fernseher ausgegeben. Alle Einstellungen können über eine
-HTTPS-Weboberfläche geändert werden.
-
----
-
-## 🔄 Kommunikationsfluss
-
-1. **macOS (Deployment)**
-   - Kopiert Setup-Skripte per SSH auf den Raspberry Pi
-   - Führt die Installation remote aus
-
-2. **Raspberry Pi**
-   - Verbindet sich automatisch mit dem WLAN
-   - Startet GUI (LightDM + Openbox)
-   - Öffnet VNC-Verbindung zum Laptop
-   - Gibt Bild über HDMI aus
-
-3. **Webbrowser**
-   - Zugriff per HTTPS auf WebUI
-   - WLAN- und VNC-Ziel konfigurieren
-   - Änderungen werden gespeichert & angewendet
-
----
-
-## 🚀 Features
-
-- ✅ Automatischer Start nach Reboot
-- ✅ Headless Betrieb (kein Login nötig)
-- ✅ Webbasierte Konfiguration (HTTPS)
-- ✅ SSH-Key-Deployment
-- ✅ Optimiert für Raspberry Pi 1
-- ✅ Keine Cloud / keine Fremddienste
-
----
-
-## 📦 Repository-Struktur
-
-```
-.
-├── deploy_to_pi.sh
-├── setup_pi1_autovnc_with_webui.sh
-├── README.md
+Linux Laptop (x11vnc, Port 5900)  --->  Raspberry Pi 1 (vncviewer)  --->  HDMI/TV
 ```
 
 ---
 
-## 🛠️ Installation (Kurzfassung)
+## Raspberry Pi Setup
 
 ### Voraussetzungen
-- macOS (für Deployment)
-- Raspberry Pi OS **Legacy Lite**
-- Raspberry Pi 1
-- HDMI-TV
-- Linux Laptop mit VNC-Server
+- Raspberry Pi 1 (ARMv6)
+- Raspberry Pi OS (Legacy) / Debian Bookworm ARMHF Lite
+- SD-Karte (>= 4GB empfohlen)
 
-### Deployment
+### Installation (auf dem Pi)
+1. Script auf den Pi kopieren
+2. Ausführen:
+
 ```bash
-chmod +x deploy_to_pi.sh
-./deploy_to_pi.sh --host raspberrypi.local --reboot
+chmod +x setup_pi1_autovnc_with_webui.sh
+sudo ./setup_pi1_autovnc_with_webui.sh
+```
+
+Danach:
+- WebUI: `https://<PI-IP>`
+- Standard Login: `admin / admin123`
+- Der Pi startet automatisch eine GUI (LightDM/Openbox) und startet danach den VNC Viewer.
+
+---
+
+## WebUI: Konfiguration
+
+In der Weboberfläche kannst du einstellen:
+
+### WLAN
+- Country / SSID / Passwort
+
+### VNC
+- **VNC Host**: IP/Hostname des Linux-Laptops
+- **VNC Passwort**: wird auf dem Pi als Datei gespeichert (für Auto-Connect)
+- Fullscreen / ViewOnly
+- Quality / Compress
+- Boot-Delay
+
+### HDMI-Auflösung (Output Mode)
+- **720p (1280x720)** – empfohlen, stabil auf Pi 1
+- **1080p (1920x1080)** – kann funktionieren, ist aber deutlich schwerer für Pi 1
+
+⚠️ Nach Änderung der Auflösung ist ein **Reboot** nötig.  
+Die WebUI zeigt dann automatisch einen Reboot-Button an.
+
+---
+
+## Linux Mint Setup (VNC Server)
+
+Auf dem Linux Mint Laptop wird der Desktop mit **x11vnc** geteilt – als **systemd user service** (startet automatisch beim Login).
+
+### Installation
+```bash
+chmod +x setup_mint_x11vnc_systemd.sh
+./setup_mint_x11vnc_systemd.sh
+```
+
+Danach:
+- Port: **5900**
+- Passwort: `~/.vnc/passwd` (wird beim Setup gesetzt)
+- Service:
+  - Status: `systemctl --user status x11vnc.service`
+  - Logs: `journalctl --user -u x11vnc.service -f`
+
+### Firewall (falls nötig)
+Wenn `ufw` aktiv ist:
+```bash
+sudo ufw allow 5900/tcp
 ```
 
 ---
 
-## 🌐 Weboberfläche
+## Troubleshooting
 
-Nach dem Setup erreichbar unter:
-
+### WebUI zeigt 500 Internal Server Error
+Prüfe:
+```bash
+sudo journalctl -u autovnc-web.service -n 200 --no-pager
 ```
-https://<PI-IP>
+
+### Pi zeigt nur Desktop, kein VNC-Bild
+- Ist der Linux-Laptop erreichbar?
+```bash
+nc -vz <LINUX-IP> 5900
+```
+- Läuft `x11vnc`?
+```bash
+systemctl --user status x11vnc.service
 ```
 
-Konfigurierbar:
-- WLAN SSID & Passwort
-- VNC-Ziel (Laptop IP / Hostname)
-- VNC-Qualität
-- Startverzögerung
+### Auflösung / schwarzer Bildschirm am Pi
+- Stelle im WebUI wieder auf **720p** und reboote.
+- Pi 1 ist bei 1080p oft zu schwach.
 
 ---
 
-## ⚠️ Einschränkungen
-
-- Nicht für Gaming geeignet (VNC-Latenz)
-- Video-Wiedergabe abhängig von Netzwerk & Auflösung
-- Raspberry Pi 1 ist leistungsschwach → bewusst minimalistisches Setup
-
----
-
-## 🧠 Technischer Hintergrund
-
-- **VNC** für Bildschirmübertragung
-- **Openbox** als Window Manager
-- **LightDM** für Autologin
-- **Flask (APT)** für WebUI
-- **systemd** für Autostart & Services
-- **Nginx + SSL** für HTTPS
+## Security
+- WebUI ist per HTTPS (self-signed) abgesichert, Login via HTTP Basic Auth.
+- VNC Passwort wird am Pi als Datei abgelegt (`/home/pi/.vnc/client.passwd`).
+  - Nicht öffentlich teilen.
+  - Repo ohne echte Passwörter committen.
 
 ---
 
-## 📜 Lizenz
-
-This project is licensed under the
-Creative Commons Attribution-NonCommercial-ShareAlike 4.0 (CC BY-NC-SA 4.0).
-Commercial use is not permitted.
+## License
+(Deine Lizenz hier eintragen, z.B. CC BY-NC-SA 4.0, wenn du Non-Commercial willst)
 

@@ -4,17 +4,13 @@ set -euo pipefail
 # ==========================================
 # Linux Mint: x11vnc als systemd USER Service
 # ==========================================
-# - Startet den aktuell eingeloggten Desktop (X11) via VNC
-# - Port: 5900
-# - Passwort: ~/.vnc/passwd (einmalig setzen)
-# - Service: systemctl --user (läuft pro Benutzer-Session)
-#
 # Usage:
 #   chmod +x setup_mint_x11vnc_systemd.sh
 #   ./setup_mint_x11vnc_systemd.sh
 #
-# Danach:
+# Status:
 #   systemctl --user status x11vnc.service
+# Logs:
 #   journalctl --user -u x11vnc.service -f
 # ==========================================
 
@@ -34,7 +30,7 @@ echo "==> Erzeuge Passwortdatei (falls nicht vorhanden): $PASSFILE"
 if [[ ! -f "$PASSFILE" ]]; then
   mkdir -p "$HOME/.vnc"
   echo
-  echo "Setze jetzt das VNC-Passwort (wird am RPi in der WebUI eingetragen):"
+  echo "Setze jetzt das VNC-Passwort (dieses Passwort trägst du am RPi in der WebUI ein):"
   x11vnc -storepasswd "$PASSFILE"
   chmod 600 "$PASSFILE"
 fi
@@ -51,15 +47,9 @@ Wants=graphical-session.target
 [Service]
 Type=simple
 
-# WICHTIG:
 # Für Linux Mint Cinnamon unter X11 ist DISPLAY meistens :0.
-# XAUTHORITY liegt i.d.R. in ~/.Xauthority.
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=%h/.Xauthority
-
-# Optional: Wenn du mehrere Monitore hast und "falsches" Display siehst,
-# kann DISPLAY auch :1 oder ähnlich sein.
-# Dann später hier ändern.
 
 ExecStart=/usr/bin/x11vnc \
   -display ${DISPLAY} \
@@ -98,7 +88,6 @@ echo "Stop/Start:"
 echo "  systemctl --user stop x11vnc.service"
 echo "  systemctl --user start x11vnc.service"
 echo
-echo "Hinweis: Der Service startet automatisch, sobald DU dich grafisch einloggst."
 echo "Port: 5900  | Passwort: ~/.vnc/passwd"
 echo "=================================================="
 

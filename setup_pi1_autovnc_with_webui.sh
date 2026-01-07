@@ -16,34 +16,37 @@ set -euo pipefail
 #     * VNC Host (IP/Hostname des Linux-Laptops)
 #     * VNC Passwort (wird als vncviewer -passwd file gespeichert)
 #     * Fullscreen/ViewOnly/Quality/Compress/Delay
+#     * HDMI-Auflösung (720p/1080p) -> Reboot erforderlich
 # - Autostart: VNC Viewer startet automatisch in X :0 nach Boot
 #
 # WebUI:
 #   https://<PI-IP>   (Self-signed Zertifikat)
-#
-# WICHTIG:
-# - Auf dem Linux-Laptop muss ein VNC-Server laufen (Port 5900).
 # ==========================================================
 
 # --------------- WebUI Login (ändern!) ---------------
 WEBUI_USER="admin"
 WEBUI_PASS="admin123"
 
-# --------------- Defaults (kannst du später via WebUI ändern) ---------------
+# --------------- Defaults ---------------
 DEFAULT_WIFI_COUNTRY="DE"
 DEFAULT_WIFI_SSID=""
 DEFAULT_WIFI_PASS=""
 
-DEFAULT_VNC_HOST="192.168.178.21"   # IP/Hostname vom Linux Laptop (VNC-Server)
-DEFAULT_VNC_PASS=""                  # VNC Passwort (wird in Datei umgewandelt)
+DEFAULT_VNC_HOST="192.168.178.21"   # Linux-Laptop IP/Hostname
+DEFAULT_VNC_PASS=""                 # VNC Passwort (wird als Datei gespeichert)
 
 DEFAULT_VNC_FULLSCREEN="true"
 DEFAULT_VNC_VIEWONLY="true"
-DEFAULT_VNC_QUALITY="4"              # 0..9
-DEFAULT_VNC_COMPRESS="5"             # 0..9
-DEFAULT_WAIT_AFTER_BOOT="20"         # Sekunden
+DEFAULT_VNC_QUALITY="4"             # 0..9
+DEFAULT_VNC_COMPRESS="5"            # 0..9
+DEFAULT_WAIT_AFTER_BOOT="20"        # Sekunden
 
-# ----------------------------------------------------------
+# HDMI Output Mode (WebUI: 720p/1080p)
+# Valid:
+#   720p  -> 1280x720  (hdmi_mode=4, group=1)
+#   1080p -> 1920x1080 (hdmi_mode=16, group=1)  (kann auf Pi1 schwer sein)
+DEFAULT_OUTPUT_MODE="720p"
+
 TARGET_USER="pi"
 TARGET_HOME="/home/pi"
 
@@ -52,7 +55,7 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-echo "==> Pakete installieren (RPi1/ARMv6, Bookworm)..."
+echo "==> Pakete installieren..."
 apt-get update
 apt-get install -y --no-install-recommends \
   ca-certificates openssl \
@@ -81,28 +84,30 @@ install -d -m 0755 /etc/nginx/ssl
 # ----------------------------------------------------------
 echo "==> RPi1 HDMI/Xorg Fix (fbdev)..."
 
-# 1) /boot/config.txt: vc4 overlays entfernen, HDMI/FB erzwingen
 BOOTCFG="/boot/config.txt"
 if [[ -f "$BOOTCFG" ]]; then
   # Entferne vc4 overlays (kms/fkms)
   sed -i '/^dtoverlay=vc4-kms-v3d/d' "$BOOTCFG" || true
   sed -i '/^dtoverlay=vc4-fkms-v3d/d' "$BOOTCFG" || true
 
-  # Ergänze unsere Einstellungen, falls nicht vorhanden
-  grep -q "RPi1 HDMI + X11 FIX" "$BOOTCFG" || cat >>"$BOOTCFG" <<'EOF'
+  # Basisblock (nur einmal)
+  grep -q "RPi1 HDMI + X11 FIX (AutoVNC)" "$BOOTCFG" || cat >>"$BOOTCFG" <<'EOF'
 
 # === RPi1 HDMI + X11 FIX (AutoVNC) ===
+# NOTE: output_mode wird durch /opt/autovnc/bin/apply_config.sh gepflegt
 hdmi_force_hotplug=1
-hdmi_group=1
-hdmi_mode=4          # 720p60 (stabil auf RPi1)
 disable_overscan=1
+gpu_mem=128
+
+# Default (wird ggf. überschrieben):
+hdmi_group=1
+hdmi_mode=4
 framebuffer_width=1280
 framebuffer_height=720
-gpu_mem=128
 EOF
 fi
 
-# 2) Xorg fbdev config
+# Xorg fbdev config
 install -d -m 0755 /etc/X11/xorg.conf.d
 cat >/etc/X11/xorg.conf.d/99-fbdev.conf <<'EOF'
 Section "Device"
@@ -132,7 +137,9 @@ if [[ ! -f "$CONFIG" ]]; then
   "vnc_quality": $DEFAULT_VNC_QUALITY,
   "vnc_compress": $DEFAULT_VNC_COMPRESS,
 
-  "wait_after_boot": $DEFAULT_WAIT_AFTER_BOOT
+  "wait_after_boot": $DEFAULT_WAIT_AFTER_BOOT,
+
+  "output_mode": "$DEFAULT_OUTPUT_MODE"
 }
 EOF
   chmod 600 "$CONFIG"
@@ -140,9 +147,10 @@ fi
 
 # ----------------------------------------------------------
 # apply_config.sh
-# - schreibt WLAN
-# - erzeugt VNC pass file (/home/pi/.vnc/client.passwd)
-# - erzeugt start-vnc.sh
+# - WLAN
+# - VNC pass file
+# - start-vnc.sh
+# - HDMI output_mode in /boot/config.txt (Reboot nötig)
 # ----------------------------------------------------------
 APPLY="/opt/autovnc/bin/apply_config.sh"
 cat >"$APPLY" <<'EOF'
@@ -150,6 +158,8 @@ cat >"$APPLY" <<'EOF'
 set -euo pipefail
 
 CFG="/opt/autovnc/config.json"
+BOOTCFG="/boot/config.txt"
+REBOOT_FLAG="/opt/autovnc/reboot_required"
 
 py_get() {
   local k="$1"
@@ -195,6 +205,8 @@ QUALITY="$(py_get_int vnc_quality)"
 COMPRESS="$(py_get_int vnc_compress)"
 WAIT="$(py_get_int wait_after_boot)"
 
+OUTPUT_MODE="$(py_get output_mode)"
+
 [[ -z "$WIFI_COUNTRY" ]] && WIFI_COUNTRY="DE"
 [[ -z "$VNC_HOST" ]] && VNC_HOST="127.0.0.1"
 [[ $QUALITY -lt 0 ]] && QUALITY=0
@@ -202,8 +214,9 @@ WAIT="$(py_get_int wait_after_boot)"
 [[ $COMPRESS -lt 0 ]] && COMPRESS=0
 [[ $COMPRESS -gt 9 ]] && COMPRESS=9
 [[ $WAIT -lt 0 ]] && WAIT=0
+[[ -z "$OUTPUT_MODE" ]] && OUTPUT_MODE="720p"
 
-echo "==> [apply] WLAN SSID=${WIFI_SSID:-<leer>} | VNC host=$VNC_HOST | wait=$WAIT"
+echo "==> [apply] WLAN SSID=${WIFI_SSID:-<leer>} | VNC host=$VNC_HOST | wait=$WAIT | output_mode=$OUTPUT_MODE"
 
 # --- WLAN anwenden (nur wenn SSID gesetzt) ---
 if [[ -n "$WIFI_SSID" ]]; then
@@ -227,6 +240,54 @@ WPAEOF
   systemctl restart dhcpcd >/dev/null 2>&1 || true
 fi
 
+# --- HDMI output_mode setzen (boot/config.txt) ---
+# 720p: group=1 mode=4  framebuffer 1280x720
+# 1080p: group=1 mode=16 framebuffer 1920x1080
+# Wir setzen nur dann reboot_required, wenn sich Werte ändern.
+desired_group="1"
+desired_mode="4"
+desired_w="1280"
+desired_h="720"
+
+case "$OUTPUT_MODE" in
+  720p|720P)
+    desired_group="1"; desired_mode="4"; desired_w="1280"; desired_h="720"
+    ;;
+  1080p|1080P)
+    desired_group="1"; desired_mode="16"; desired_w="1920"; desired_h="1080"
+    ;;
+  *)
+    echo "WARN: output_mode '$OUTPUT_MODE' unbekannt -> fallback 720p"
+    desired_group="1"; desired_mode="4"; desired_w="1280"; desired_h="720"
+    ;;
+esac
+
+if [[ -f "$BOOTCFG" ]]; then
+  cur_group="$(grep -E '^hdmi_group=' "$BOOTCFG" | tail -n1 | cut -d= -f2 || true)"
+  cur_mode="$(grep -E '^hdmi_mode=' "$BOOTCFG" | tail -n1 | cut -d= -f2 || true)"
+  cur_w="$(grep -E '^framebuffer_width=' "$BOOTCFG" | tail -n1 | cut -d= -f2 || true)"
+  cur_h="$(grep -E '^framebuffer_height=' "$BOOTCFG" | tail -n1 | cut -d= -f2 || true)"
+
+  changed="no"
+  [[ "$cur_group" != "$desired_group" ]] && changed="yes"
+  [[ "$cur_mode"  != "$desired_mode"  ]] && changed="yes"
+  [[ "$cur_w"     != "$desired_w"     ]] && changed="yes"
+  [[ "$cur_h"     != "$desired_h"     ]] && changed="yes"
+
+  # Replace or append lines
+  grep -q '^hdmi_group=' "$BOOTCFG" && sed -i "s/^hdmi_group=.*/hdmi_group=$desired_group/" "$BOOTCFG" || echo "hdmi_group=$desired_group" >>"$BOOTCFG"
+  grep -q '^hdmi_mode=' "$BOOTCFG" && sed -i "s/^hdmi_mode=.*/hdmi_mode=$desired_mode/" "$BOOTCFG" || echo "hdmi_mode=$desired_mode" >>"$BOOTCFG"
+  grep -q '^framebuffer_width=' "$BOOTCFG" && sed -i "s/^framebuffer_width=.*/framebuffer_width=$desired_w/" "$BOOTCFG" || echo "framebuffer_width=$desired_w" >>"$BOOTCFG"
+  grep -q '^framebuffer_height=' "$BOOTCFG" && sed -i "s/^framebuffer_height=.*/framebuffer_height=$desired_h/" "$BOOTCFG" || echo "framebuffer_height=$desired_h" >>"$BOOTCFG"
+
+  if [[ "$changed" == "yes" ]]; then
+    echo "==> [apply] HDMI output geändert -> Reboot erforderlich"
+    date > "$REBOOT_FLAG"
+  else
+    rm -f "$REBOOT_FLAG" || true
+  fi
+fi
+
 # --- VNC Passwortdatei erzeugen (für vncviewer -passwd) ---
 mkdir -p /home/pi/.vnc
 chown -R pi:pi /home/pi/.vnc
@@ -234,13 +295,11 @@ chmod 700 /home/pi/.vnc
 
 PASSFILE="/home/pi/.vnc/client.passwd"
 if [[ -n "$VNC_PASS" ]]; then
-  # vncpasswd -f -> obfuscated format für TightVNC Viewer
   printf "%s\n" "$VNC_PASS" | vncpasswd -f > "$PASSFILE"
   chown pi:pi "$PASSFILE"
   chmod 600 "$PASSFILE"
   echo "==> [apply] VNC Passwortdatei aktualisiert: $PASSFILE"
 else
-  # Wenn leer, Datei entfernen -> Viewer würde sonst ggf. prompten (nicht gewünscht)
   rm -f "$PASSFILE" || true
   echo "==> [apply] Kein VNC Passwort gesetzt (PASSFILE entfernt)"
 fi
@@ -249,12 +308,6 @@ fi
 ARGS=""
 [[ "$FULLSCREEN" == "true" ]] && ARGS="$ARGS -fullscreen"
 [[ "$VIEWONLY" == "true" ]] && ARGS="$ARGS -viewonly"
-
-# Wenn kein Passwort gesetzt ist, brechen wir lieber ab statt "unsichtbar zu warten"
-# (Du kannst bewusst leer lassen, aber dann musst du manuell eingeben – das willst du nicht.)
-NEED_PASS="yes"
-[[ -f "$PASSFILE" ]] && NEED_PASS="no"
-# Wir lassen den Start trotzdem zu, aber loggen deutlich.
 
 cat >/home/pi/autovnc/start-vnc.sh <<START
 #!/bin/bash
@@ -276,14 +329,14 @@ echo "Host: $VNC_HOST"
 
 sleep $WAIT
 
-# Port check (optional)
+# Port check
 nc -z -w2 "$VNC_HOST" 5900 && echo "Port 5900 erreichbar" || echo "WARN: Port 5900 nicht erreichbar"
 
-if [[ ! -f "$PASSFILE" ]]; then
+if [[ -f "$PASSFILE" ]]; then
+  exec vncviewer $ARGS -quality $QUALITY -compresslevel $COMPRESS -passwd "$PASSFILE" "$VNC_HOST"
+else
   echo "WARN: Kein Passwortfile vorhanden -> vncviewer könnte auf Eingabe warten."
   exec vncviewer $ARGS -quality $QUALITY -compresslevel $COMPRESS "$VNC_HOST"
-else
-  exec vncviewer $ARGS -quality $QUALITY -compresslevel $COMPRESS -passwd "$PASSFILE" "$VNC_HOST"
 fi
 START
 
@@ -315,6 +368,7 @@ from flask import Flask, request, Response
 CFG="/opt/autovnc/config.json"
 CREDS="/opt/autovnc/web/creds.env"
 APPLY="/opt/autovnc/bin/apply_config.sh"
+REBOOT_FLAG="/opt/autovnc/reboot_required"
 
 app = Flask(__name__)
 
@@ -351,6 +405,9 @@ def write_cfg(cfg):
     with open(CFG,"w",encoding="utf-8") as f:
         json.dump(cfg,f,indent=2)
 
+def reboot_required():
+    return os.path.exists(REBOOT_FLAG)
+
 PAGE = """
 <!doctype html>
 <html><head>
@@ -358,15 +415,17 @@ PAGE = """
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>AutoVNC Config</title>
 <style>
-body{font-family:system-ui,-apple-system,sans-serif;max-width:900px;margin:20px auto;padding:0 14px}
-.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-input,select{width:100%;padding:10px;margin:6px 0 14px 0}
-.ok{background:#e8ffe8;padding:10px;border:1px solid #b4f0b4;border-radius:10px}
-.warn{background:#fff3cd;padding:10px;border:1px solid #ffe69c;border-radius:10px}
-.small{color:#555}
+body{{font-family:system-ui,-apple-system,sans-serif;max-width:900px;margin:20px auto;padding:0 14px}}
+.row{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}
+input,select{{width:100%;padding:10px;margin:6px 0 14px 0}}
+.ok{{background:#e8ffe8;padding:10px;border:1px solid #b4f0b4;border-radius:10px}}
+.warn{{background:#fff3cd;padding:10px;border:1px solid #ffe69c;border-radius:10px}}
+.small{{color:#555}}
+button{{padding:12px;width:100%}}
+hr{{margin:18px 0}}
 </style></head>
 <body>
-<h2>AutoVNC Konfiguration (Linux Laptop → RPi1 → HDMI)</h2>
+<h2>AutoVNC Konfiguration (Linux → RPi1 → HDMI)</h2>
 <p class="small">
 VNC Host ist die IP/Hostname deines Linux-Laptops. Dort muss ein VNC-Server auf Port 5900 laufen.
 </p>
@@ -379,6 +438,13 @@ VNC Host ist die IP/Hostname deines Linux-Laptops. Dort muss ein VNC-Server auf 
 </div>
 <label>SSID</label><input name="wifi_ssid" value="{wifi_ssid}"/>
 <label>Passwort</label><input name="wifi_pass" value="{wifi_pass}"/>
+
+<h3>HDMI / Auflösung</h3>
+<label>Output Mode (Reboot erforderlich)</label>
+<select name="output_mode">
+  <option value="720p" {om_720}>720p (1280x720) – empfohlen</option>
+  <option value="1080p" {om_1080}>1080p (1920x1080) – evtl. langsam auf Pi1</option>
+</select>
 
 <h3>VNC</h3>
 <label>VNC Host (Linux Laptop IP/Hostname)</label><input name="vnc_host" value="{vnc_host}"/>
@@ -408,8 +474,10 @@ VNC Host ist die IP/Hostname deines Linux-Laptops. Dort muss ein VNC-Server auf 
   <div><label>Compress (0..9)</label><input name="vnc_compress" value="{vnc_compress}"/></div>
 </div>
 
-<button type="submit" style="padding:12px;width:100%">Speichern & Anwenden</button>
+<button type="submit">Speichern & Anwenden</button>
 </form>
+
+{reboot_block}
 
 <hr/>
 <p class="small">
@@ -422,6 +490,18 @@ WebUI läuft intern auf 127.0.0.1:8080, außen via HTTPS über Nginx.
 def index():
     if not authed(): return require_auth()
     cfg=read_cfg()
+
+    reboot_block = ""
+    if reboot_required():
+        reboot_block = """
+        <div class="warn">
+          <b>Reboot erforderlich</b> (Auflösung/HDMI wurde geändert).<br/>
+          <form method="post" action="/reboot" style="margin-top:10px">
+            <button type="submit">Jetzt neu starten</button>
+          </form>
+        </div>
+        """
+
     return PAGE.format(
         msg="",
         wifi_country=cfg.get("wifi_country","DE"),
@@ -436,6 +516,9 @@ def index():
         fs_f="selected" if not cfg.get("vnc_fullscreen",True) else "",
         vo_t="selected" if cfg.get("vnc_viewonly",True) else "",
         vo_f="selected" if not cfg.get("vnc_viewonly",True) else "",
+        om_720="selected" if cfg.get("output_mode","720p")=="720p" else "",
+        om_1080="selected" if cfg.get("output_mode","720p")=="1080p" else "",
+        reboot_block=reboot_block
     )
 
 @app.route("/save", methods=["POST"])
@@ -446,6 +529,8 @@ def save():
     cfg["wifi_country"]=request.form.get("wifi_country","DE").strip() or "DE"
     cfg["wifi_ssid"]=request.form.get("wifi_ssid","").strip()
     cfg["wifi_pass"]=request.form.get("wifi_pass","")
+
+    cfg["output_mode"]=request.form.get("output_mode","720p").strip() or "720p"
 
     cfg["vnc_host"]=request.form.get("vnc_host","").strip()
     cfg["vnc_pass"]=request.form.get("vnc_pass","")
@@ -464,12 +549,26 @@ def save():
 
     write_cfg(cfg)
 
+    msg=""
     try:
         subprocess.run([APPLY], check=False)
-        msg='<div class="ok">Gespeichert & angewendet. WLAN/VNC wurde aktualisiert.</div>'
+        msg='<div class="ok">Gespeichert & angewendet. WLAN/VNC/HDMI wurde aktualisiert.</div>'
     except Exception as e:
         msg=f'<div class="warn">Gespeichert, aber Apply-Fehler: {e}</div>'
 
+    # Reboot block einfügen
+    reboot_block = ""
+    if reboot_required():
+        reboot_block = """
+        <div class="warn">
+          <b>Reboot erforderlich</b> (Auflösung/HDMI wurde geändert).<br/>
+          <form method="post" action="/reboot" style="margin-top:10px">
+            <button type="submit">Jetzt neu starten</button>
+          </form>
+        </div>
+        """
+
+    cfg=read_cfg()
     return PAGE.format(
         msg=msg,
         wifi_country=cfg.get("wifi_country","DE"),
@@ -484,7 +583,19 @@ def save():
         fs_f="selected" if not cfg.get("vnc_fullscreen",True) else "",
         vo_t="selected" if cfg.get("vnc_viewonly",True) else "",
         vo_f="selected" if not cfg.get("vnc_viewonly",True) else "",
+        om_720="selected" if cfg.get("output_mode","720p")=="720p" else "",
+        om_1080="selected" if cfg.get("output_mode","720p")=="1080p" else "",
+        reboot_block=reboot_block
     )
+
+@app.route("/reboot", methods=["POST"])
+def do_reboot():
+    if not authed(): return require_auth()
+    try:
+        subprocess.Popen(["/usr/sbin/reboot"])
+    except:
+        pass
+    return Response("Rebooting...", 200, {"Content-Type": "text/plain"})
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=8080)
@@ -588,7 +699,7 @@ chmod 0644 /home/pi/.config/openbox/autostart
 
 systemctl enable lightdm >/dev/null 2>&1 || true
 
-# initial apply (erstellt start-vnc.sh + passwd file falls gesetzt)
+# initial apply
 echo "==> Initial apply_config..."
 bash "$APPLY" || true
 
@@ -597,9 +708,6 @@ echo "=================================================="
 echo "FERTIG ✅"
 echo "WebUI (HTTPS): https://<PI-IP>"
 echo "Login: $WEBUI_USER / $WEBUI_PASS"
-echo
-echo "Linux Laptop: VNC-Server muss laufen (Port 5900)."
-echo "Pi startet nach Boot automatisch den VNC-Viewer."
-echo "Empfohlen: sudo reboot"
+echo "Hinweis: Nach Änderung der Auflösung ist ein Reboot nötig."
 echo "=================================================="
 
