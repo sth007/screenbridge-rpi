@@ -1,31 +1,52 @@
 # AutoVNC RPi1 (Linux → Raspberry Pi → HDMI)
 
-Dieses Projekt macht aus einem **Raspberry Pi 1** einen **VNC-Client**, der den Bildschirm eines **Linux Mint (oder allgemein Linux/X11) Laptops** automatisch auf **HDMI/TV** anzeigt.
+AutoVNC macht aus einem **Raspberry Pi 1** einen **autostartenden VNC-Client**, der den Bildschirm
+eines **Linux‑Laptops (z. B. Linux Mint)** automatisch auf einem **HDMI‑Display / TV** anzeigt.
 
-✅ Linux Laptop = **VNC Server** (x11vnc)  
-✅ Raspberry Pi 1 = **VNC Client** (vncviewer)  
-✅ Konfiguration per **WebUI (HTTPS)**: WLAN, VNC Host/Passwort, Startoptionen, **HDMI-Auflösung**
+Der Raspberry Pi wird vollständig **headless** betrieben und über eine **HTTPS‑WebUI**
+konfiguriert.
+
+---
+
+## Features
+
+- Raspberry Pi 1 als **VNC‑Client**
+- Linux Mint (oder X11‑Linux) als **VNC‑Server**
+- Autostart nach Boot (kein Login nötig)
+- HDMI‑Ausgabe (720p oder 1080p)
+- WebUI (HTTPS) für:
+  - WLAN‑Konfiguration
+  - VNC‑Host & Passwort
+  - Startparameter (Delay, Quality, ViewOnly)
+  - **HDMI‑Auflösung**
+  - **WebUI‑Farbschema (Light / Dark / Blue / Custom)**
+- Keine Eingaben am Pi nötig
 
 ---
 
 ## Architektur
 
 ```
-Linux Laptop (x11vnc, Port 5900)  --->  Raspberry Pi 1 (vncviewer)  --->  HDMI/TV
+Linux Laptop (x11vnc :5900)
+        │
+        │  VNC
+        ▼
+Raspberry Pi 1 (vncviewer)
+        │
+        ▼
+     HDMI / TV
 ```
 
 ---
 
-## Raspberry Pi Setup
+## Raspberry‑Pi‑Installation
 
 ### Voraussetzungen
 - Raspberry Pi 1 (ARMv6)
-- Raspberry Pi OS (Legacy) / Debian Bookworm ARMHF Lite
-- SD-Karte (>= 4GB empfohlen)
+- Raspberry Pi OS / Debian Bookworm ARMHF Lite
+- ≥ 4 GB SD‑Karte
 
-### Installation (auf dem Pi)
-1. Script auf den Pi kopieren
-2. Ausführen:
+### Installation
 
 ```bash
 chmod +x setup_pi1_autovnc_with_webui.sh
@@ -34,91 +55,87 @@ sudo ./setup_pi1_autovnc_with_webui.sh
 
 Danach:
 - WebUI: `https://<PI-IP>`
-- Standard Login: `admin / admin123`
-- Der Pi startet automatisch eine GUI (LightDM/Openbox) und startet danach den VNC Viewer.
+- Login: `admin / admin123`
+- Autostart erfolgt automatisch nach Reboot
 
 ---
 
-## WebUI: Konfiguration
+## WebUI – Einstellungen
 
-In der Weboberfläche kannst du einstellen:
-
-### WLAN
-- Country / SSID / Passwort
+### Netzwerk
+- WLAN‑Land, SSID, Passwort
 
 ### VNC
-- **VNC Host**: IP/Hostname des Linux-Laptops
-- **VNC Passwort**: wird auf dem Pi als Datei gespeichert (für Auto-Connect)
+- Hostname / IP des Linux‑Laptops
+- Passwort (wird lokal als Datei gespeichert)
 - Fullscreen / ViewOnly
-- Quality / Compress
-- Boot-Delay
+- Quality & Compress
+- Start‑Delay
 
-### HDMI-Auflösung (Output Mode)
-- **720p (1280x720)** – empfohlen, stabil auf Pi 1
-- **1080p (1920x1080)** – kann funktionieren, ist aber deutlich schwerer für Pi 1
+### HDMI‑Auflösung
+- **720p (empfohlen)** – stabil auf RPi1
+- 1080p (experimentell)
 
-⚠️ Nach Änderung der Auflösung ist ein **Reboot** nötig.  
-Die WebUI zeigt dann automatisch einen Reboot-Button an.
+> Nach Änderung der Auflösung ist ein Reboot erforderlich (Button erscheint automatisch).
+
+### WebUI‑Farben
+- Light / Dark / Blue
+- Custom‑Theme mit:
+  - Hintergrundfarbe
+  - Textfarbe
+  - Akzentfarbe
+
+Änderungen werden **sofort** wirksam (kein Neustart nötig).
 
 ---
 
-## Linux Mint Setup (VNC Server)
+## Linux‑Laptop‑Setup (VNC‑Server)
 
-Auf dem Linux Mint Laptop wird der Desktop mit **x11vnc** geteilt – als **systemd user service** (startet automatisch beim Login).
+Der Linux‑Desktop wird mit **x11vnc** geteilt und als **systemd‑User‑Service**
+automatisch beim Login gestartet.
 
-### Installation
+### Installation (Linux Mint)
+
 ```bash
 chmod +x setup_mint_x11vnc_systemd.sh
 ./setup_mint_x11vnc_systemd.sh
 ```
 
-Danach:
-- Port: **5900**
-- Passwort: `~/.vnc/passwd` (wird beim Setup gesetzt)
-- Service:
-  - Status: `systemctl --user status x11vnc.service`
-  - Logs: `journalctl --user -u x11vnc.service -f`
+- Port: `5900`
+- Passwort: `~/.vnc/passwd`
 
-### Firewall (falls nötig)
-Wenn `ufw` aktiv ist:
+Service‑Status:
+```bash
+systemctl --user status x11vnc.service
+```
+
+Logs:
+```bash
+journalctl --user -u x11vnc.service -f
+```
+
+Firewall (falls aktiv):
 ```bash
 sudo ufw allow 5900/tcp
 ```
 
 ---
 
-## Troubleshooting
+## Sicherheit
 
-### WebUI zeigt 500 Internal Server Error
-Prüfe:
-```bash
-sudo journalctl -u autovnc-web.service -n 200 --no-pager
-```
-
-### Pi zeigt nur Desktop, kein VNC-Bild
-- Ist der Linux-Laptop erreichbar?
-```bash
-nc -vz <LINUX-IP> 5900
-```
-- Läuft `x11vnc`?
-```bash
-systemctl --user status x11vnc.service
-```
-
-### Auflösung / schwarzer Bildschirm am Pi
-- Stelle im WebUI wieder auf **720p** und reboote.
-- Pi 1 ist bei 1080p oft zu schwach.
+- WebUI über HTTPS (self‑signed Zertifikat)
+- HTTP Basic Auth
+- VNC‑Passwörter werden **nicht** im Klartext gespeichert
+- Keine Cloud‑Abhängigkeiten
 
 ---
 
-## Security
-- WebUI ist per HTTPS (self-signed) abgesichert, Login via HTTP Basic Auth.
-- VNC Passwort wird am Pi als Datei abgelegt (`/home/pi/.vnc/client.passwd`).
-  - Nicht öffentlich teilen.
-  - Repo ohne echte Passwörter committen.
+## Lizenz
 
----
+Empfohlen:
+**Creative Commons BY‑NC‑SA 4.0**
 
-## License
-(Deine Lizenz hier eintragen, z.B. CC BY-NC-SA 4.0, wenn du Non-Commercial willst)
+- Private Nutzung erlaubt
+- **Kommerzielle Nutzung nicht erlaubt**
+- Weitergabe nur unter gleichen Bedingungen
 

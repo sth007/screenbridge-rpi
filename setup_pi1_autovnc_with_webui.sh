@@ -3,59 +3,44 @@ set -euo pipefail
 
 # ==========================================================
 # setup_pi1_autovnc_with_webui.sh  (RPi 1 / ARMv6)
-#
-# Ziel:
-#   Linux Laptop (VNC-Server)  -->  Raspberry Pi 1 (VNC-Client) --> HDMI/TV
-#
-# Features:
-# - Minimal GUI: LightDM + Openbox + LXPanel
-# - Xorg auf fbdev gezwungen (HDMI zuverlässig auf RPi1)
-# - Auto-Login pi, kein CLI-Login am HDMI
-# - WebUI (HTTPS via Nginx) zum Setzen von:
-#     * WLAN SSID/Pass
-#     * VNC Host (IP/Hostname des Linux-Laptops)
-#     * VNC Passwort (wird als vncviewer -passwd file gespeichert)
-#     * Fullscreen/ViewOnly/Quality/Compress/Delay
-#     * HDMI-Auflösung (720p/1080p) -> Reboot erforderlich
-# - Autostart: VNC Viewer startet automatisch in X :0 nach Boot
-#
-# WebUI:
-#   https://<PI-IP>   (Self-signed Zertifikat)
+# WebUI (HTTPS) für WLAN, VNC, HDMI-Auflösung, UI-Theme/Farben,
+# und VNC Performance (depth/encodings/quality/compress)
 # ==========================================================
 
-# --------------- WebUI Login (ändern!) ---------------
 WEBUI_USER="admin"
 WEBUI_PASS="admin123"
 
-# --------------- Defaults ---------------
 DEFAULT_WIFI_COUNTRY="DE"
 DEFAULT_WIFI_SSID=""
 DEFAULT_WIFI_PASS=""
 
-DEFAULT_VNC_HOST="192.168.178.21"   # Linux-Laptop IP/Hostname
-DEFAULT_VNC_PASS=""                 # VNC Passwort (wird als Datei gespeichert)
+DEFAULT_VNC_HOST="192.168.178.21"
+DEFAULT_VNC_PASS=""
 
 DEFAULT_VNC_FULLSCREEN="true"
 DEFAULT_VNC_VIEWONLY="true"
-DEFAULT_VNC_QUALITY="4"             # 0..9
-DEFAULT_VNC_COMPRESS="5"            # 0..9
-DEFAULT_WAIT_AFTER_BOOT="20"        # Sekunden
 
-# HDMI Output Mode (WebUI: 720p/1080p)
-# Valid:
-#   720p  -> 1280x720  (hdmi_mode=4, group=1)
-#   1080p -> 1920x1080 (hdmi_mode=16, group=1)  (kann auf Pi1 schwer sein)
-DEFAULT_OUTPUT_MODE="720p"
+# Performance Defaults (gut für RPi1)
+DEFAULT_VNC_QUALITY="3"           # 0..9
+DEFAULT_VNC_COMPRESS="6"          # 0..9
+DEFAULT_VNC_DEPTH="16"            # 16 oder 24
+DEFAULT_VNC_ENCODINGS="stable"    # stable | raw-fast | tight-best
 
-TARGET_USER="pi"
-TARGET_HOME="/home/pi"
+DEFAULT_WAIT_AFTER_BOOT="20"
+DEFAULT_OUTPUT_MODE="720p"        # 720p/1080p
+
+# WebUI theme defaults
+DEFAULT_UI_THEME="dark"           # light/dark/blue/custom
+DEFAULT_UI_BG="#111111"
+DEFAULT_UI_FG="#eeeeee"
+DEFAULT_UI_ACCENT="#4ea3ff"
 
 if [[ $EUID -ne 0 ]]; then
   echo "Bitte als root ausführen: sudo $0"
   exit 1
 fi
 
-echo "==> Pakete installieren..."
+echo "==> Installiere Pakete..."
 apt-get update
 apt-get install -y --no-install-recommends \
   ca-certificates openssl \
@@ -71,35 +56,28 @@ apt-get install -y --no-install-recommends \
   xtightvncviewer tightvncserver \
   wmctrl
 
-# ----------------------------------------------------------
-# Verzeichnisse
-# ----------------------------------------------------------
 echo "==> Verzeichnisse anlegen..."
 install -d -m 0755 /opt/autovnc/bin
 install -d -m 0755 /opt/autovnc/web
 install -d -m 0755 /etc/nginx/ssl
 
 # ----------------------------------------------------------
-# HDMI/Xorg Fix (RPi1): fbdev erzwingen + vc4 overlays entfernen
+# HDMI/Xorg Fix: fbdev + stabile config.txt Defaults
 # ----------------------------------------------------------
-echo "==> RPi1 HDMI/Xorg Fix (fbdev)..."
-
+echo "==> HDMI/Xorg Fix (fbdev)..."
 BOOTCFG="/boot/config.txt"
 if [[ -f "$BOOTCFG" ]]; then
-  # Entferne vc4 overlays (kms/fkms)
   sed -i '/^dtoverlay=vc4-kms-v3d/d' "$BOOTCFG" || true
   sed -i '/^dtoverlay=vc4-fkms-v3d/d' "$BOOTCFG" || true
 
-  # Basisblock (nur einmal)
   grep -q "RPi1 HDMI + X11 FIX (AutoVNC)" "$BOOTCFG" || cat >>"$BOOTCFG" <<'EOF'
 
 # === RPi1 HDMI + X11 FIX (AutoVNC) ===
-# NOTE: output_mode wird durch /opt/autovnc/bin/apply_config.sh gepflegt
 hdmi_force_hotplug=1
 disable_overscan=1
 gpu_mem=128
 
-# Default (wird ggf. überschrieben):
+# Default HDMI Mode (wird über WebUI/apply_config gepflegt)
 hdmi_group=1
 hdmi_mode=4
 framebuffer_width=1280
@@ -107,7 +85,6 @@ framebuffer_height=720
 EOF
 fi
 
-# Xorg fbdev config
 install -d -m 0755 /etc/X11/xorg.conf.d
 cat >/etc/X11/xorg.conf.d/99-fbdev.conf <<'EOF'
 Section "Device"
@@ -118,11 +95,11 @@ EndSection
 EOF
 
 # ----------------------------------------------------------
-# config.json
+# config.json (inkl. output_mode + ui_theme + Farben + Perf)
 # ----------------------------------------------------------
 CONFIG="/opt/autovnc/config.json"
 if [[ ! -f "$CONFIG" ]]; then
-  echo "==> Default config.json erstellen..."
+  echo "==> Erzeuge Default /opt/autovnc/config.json ..."
   cat >"$CONFIG" <<EOF
 {
   "wifi_country": "$DEFAULT_WIFI_COUNTRY",
@@ -134,12 +111,19 @@ if [[ ! -f "$CONFIG" ]]; then
 
   "vnc_fullscreen": $DEFAULT_VNC_FULLSCREEN,
   "vnc_viewonly": $DEFAULT_VNC_VIEWONLY,
+
   "vnc_quality": $DEFAULT_VNC_QUALITY,
   "vnc_compress": $DEFAULT_VNC_COMPRESS,
+  "vnc_depth": $DEFAULT_VNC_DEPTH,
+  "vnc_encodings": "$DEFAULT_VNC_ENCODINGS",
 
   "wait_after_boot": $DEFAULT_WAIT_AFTER_BOOT,
+  "output_mode": "$DEFAULT_OUTPUT_MODE",
 
-  "output_mode": "$DEFAULT_OUTPUT_MODE"
+  "ui_theme": "$DEFAULT_UI_THEME",
+  "ui_bg": "$DEFAULT_UI_BG",
+  "ui_fg": "$DEFAULT_UI_FG",
+  "ui_accent": "$DEFAULT_UI_ACCENT"
 }
 EOF
   chmod 600 "$CONFIG"
@@ -147,10 +131,6 @@ fi
 
 # ----------------------------------------------------------
 # apply_config.sh
-# - WLAN
-# - VNC pass file
-# - start-vnc.sh
-# - HDMI output_mode in /boot/config.txt (Reboot nötig)
 # ----------------------------------------------------------
 APPLY="/opt/autovnc/bin/apply_config.sh"
 cat >"$APPLY" <<'EOF'
@@ -170,24 +150,20 @@ v=cfg.get("$k","")
 print(v if v is not None else "")
 PY
 }
-
 py_get_bool() {
   local k="$1"
   python3 - <<PY
 import json
 cfg=json.load(open("$CFG"))
-v=cfg.get("$k", False)
-print("true" if bool(v) else "false")
+print("true" if bool(cfg.get("$k", False)) else "false")
 PY
 }
-
 py_get_int() {
   local k="$1"
   python3 - <<PY
 import json
 cfg=json.load(open("$CFG"))
-v=cfg.get("$k", 0)
-try: print(int(v))
+try: print(int(cfg.get("$k",0)))
 except: print(0)
 PY
 }
@@ -203,22 +179,23 @@ FULLSCREEN="$(py_get_bool vnc_fullscreen)"
 VIEWONLY="$(py_get_bool vnc_viewonly)"
 QUALITY="$(py_get_int vnc_quality)"
 COMPRESS="$(py_get_int vnc_compress)"
+DEPTH="$(py_get_int vnc_depth)"
+ENC_PRESET="$(py_get vnc_encodings)"
 WAIT="$(py_get_int wait_after_boot)"
 
 OUTPUT_MODE="$(py_get output_mode)"
 
 [[ -z "$WIFI_COUNTRY" ]] && WIFI_COUNTRY="DE"
 [[ -z "$VNC_HOST" ]] && VNC_HOST="127.0.0.1"
+[[ -z "$OUTPUT_MODE" ]] && OUTPUT_MODE="720p"
 [[ $QUALITY -lt 0 ]] && QUALITY=0
 [[ $QUALITY -gt 9 ]] && QUALITY=9
 [[ $COMPRESS -lt 0 ]] && COMPRESS=0
 [[ $COMPRESS -gt 9 ]] && COMPRESS=9
-[[ $WAIT -lt 0 ]] && WAIT=0
-[[ -z "$OUTPUT_MODE" ]] && OUTPUT_MODE="720p"
+[[ "$DEPTH" != "16" && "$DEPTH" != "24" ]] && DEPTH=16
+[[ -z "$ENC_PRESET" ]] && ENC_PRESET="stable"
 
-echo "==> [apply] WLAN SSID=${WIFI_SSID:-<leer>} | VNC host=$VNC_HOST | wait=$WAIT | output_mode=$OUTPUT_MODE"
-
-# --- WLAN anwenden (nur wenn SSID gesetzt) ---
+# --- WLAN ---
 if [[ -n "$WIFI_SSID" ]]; then
   WPA="/etc/wpa_supplicant/wpa_supplicant.conf"
   mkdir -p /etc/wpa_supplicant
@@ -231,7 +208,6 @@ country=$WIFI_COUNTRY
 
 WPAEOF
   wpa_passphrase "$WIFI_SSID" "$WIFI_PASS" >> "$WPA"
-
   chmod 600 "$WPA"
   chown root:root "$WPA"
 
@@ -240,26 +216,16 @@ WPAEOF
   systemctl restart dhcpcd >/dev/null 2>&1 || true
 fi
 
-# --- HDMI output_mode setzen (boot/config.txt) ---
-# 720p: group=1 mode=4  framebuffer 1280x720
-# 1080p: group=1 mode=16 framebuffer 1920x1080
-# Wir setzen nur dann reboot_required, wenn sich Werte ändern.
+# --- HDMI output_mode ---
 desired_group="1"
 desired_mode="4"
 desired_w="1280"
 desired_h="720"
 
 case "$OUTPUT_MODE" in
-  720p|720P)
-    desired_group="1"; desired_mode="4"; desired_w="1280"; desired_h="720"
-    ;;
-  1080p|1080P)
-    desired_group="1"; desired_mode="16"; desired_w="1920"; desired_h="1080"
-    ;;
-  *)
-    echo "WARN: output_mode '$OUTPUT_MODE' unbekannt -> fallback 720p"
-    desired_group="1"; desired_mode="4"; desired_w="1280"; desired_h="720"
-    ;;
+  720p|720P)  desired_group="1"; desired_mode="4";  desired_w="1280"; desired_h="720" ;;
+  1080p|1080P) desired_group="1"; desired_mode="16"; desired_w="1920"; desired_h="1080" ;;
+  *) desired_group="1"; desired_mode="4"; desired_w="1280"; desired_h="720" ;;
 esac
 
 if [[ -f "$BOOTCFG" ]]; then
@@ -274,21 +240,19 @@ if [[ -f "$BOOTCFG" ]]; then
   [[ "$cur_w"     != "$desired_w"     ]] && changed="yes"
   [[ "$cur_h"     != "$desired_h"     ]] && changed="yes"
 
-  # Replace or append lines
   grep -q '^hdmi_group=' "$BOOTCFG" && sed -i "s/^hdmi_group=.*/hdmi_group=$desired_group/" "$BOOTCFG" || echo "hdmi_group=$desired_group" >>"$BOOTCFG"
   grep -q '^hdmi_mode=' "$BOOTCFG" && sed -i "s/^hdmi_mode=.*/hdmi_mode=$desired_mode/" "$BOOTCFG" || echo "hdmi_mode=$desired_mode" >>"$BOOTCFG"
   grep -q '^framebuffer_width=' "$BOOTCFG" && sed -i "s/^framebuffer_width=.*/framebuffer_width=$desired_w/" "$BOOTCFG" || echo "framebuffer_width=$desired_w" >>"$BOOTCFG"
   grep -q '^framebuffer_height=' "$BOOTCFG" && sed -i "s/^framebuffer_height=.*/framebuffer_height=$desired_h/" "$BOOTCFG" || echo "framebuffer_height=$desired_h" >>"$BOOTCFG"
 
   if [[ "$changed" == "yes" ]]; then
-    echo "==> [apply] HDMI output geändert -> Reboot erforderlich"
     date > "$REBOOT_FLAG"
   else
     rm -f "$REBOOT_FLAG" || true
   fi
 fi
 
-# --- VNC Passwortdatei erzeugen (für vncviewer -passwd) ---
+# --- VNC client passwordfile ---
 mkdir -p /home/pi/.vnc
 chown -R pi:pi /home/pi/.vnc
 chmod 700 /home/pi/.vnc
@@ -298,13 +262,19 @@ if [[ -n "$VNC_PASS" ]]; then
   printf "%s\n" "$VNC_PASS" | vncpasswd -f > "$PASSFILE"
   chown pi:pi "$PASSFILE"
   chmod 600 "$PASSFILE"
-  echo "==> [apply] VNC Passwortdatei aktualisiert: $PASSFILE"
 else
   rm -f "$PASSFILE" || true
-  echo "==> [apply] Kein VNC Passwort gesetzt (PASSFILE entfernt)"
 fi
 
-# --- start-vnc.sh erzeugen ---
+# --- Encoding presets ---
+ENC=""
+case "$ENC_PRESET" in
+  stable)   ENC="tight copyrect hextile raw" ;;
+  raw-fast) ENC="raw" ;;
+  tight-best) ENC="tight copyrect" ;;
+  *)        ENC="tight copyrect hextile raw" ;;
+esac
+
 ARGS=""
 [[ "$FULLSCREEN" == "true" ]] && ARGS="$ARGS -fullscreen"
 [[ "$VIEWONLY" == "true" ]] && ARGS="$ARGS -viewonly"
@@ -312,11 +282,9 @@ ARGS=""
 cat >/home/pi/autovnc/start-vnc.sh <<START
 #!/bin/bash
 set -e
-
 export DISPLAY=:0
 export XAUTHORITY=/home/pi/.Xauthority
 
-# kein Blank/DPMS
 xset s off || true
 xset -dpms || true
 xset s noblank || true
@@ -324,33 +292,26 @@ xset s noblank || true
 LOG=/home/pi/autovnc/vnc.log
 exec >>"\$LOG" 2>&1
 echo "=== vnc start \$(date) ==="
-echo "DISPLAY=\$DISPLAY XAUTHORITY=\$XAUTHORITY"
 echo "Host: $VNC_HOST"
-
+echo "ENC_PRESET: $ENC_PRESET  | depth=$DEPTH | quality=$QUALITY | compress=$COMPRESS"
 sleep $WAIT
 
-# Port check
-nc -z -w2 "$VNC_HOST" 5900 && echo "Port 5900 erreichbar" || echo "WARN: Port 5900 nicht erreichbar"
-
 if [[ -f "$PASSFILE" ]]; then
-  exec vncviewer $ARGS -quality $QUALITY -compresslevel $COMPRESS -passwd "$PASSFILE" "$VNC_HOST"
+  exec vncviewer $ARGS -encodings "$ENC" -depth $DEPTH -quality $QUALITY -compresslevel $COMPRESS -passwd "$PASSFILE" "$VNC_HOST"
 else
-  echo "WARN: Kein Passwortfile vorhanden -> vncviewer könnte auf Eingabe warten."
-  exec vncviewer $ARGS -quality $QUALITY -compresslevel $COMPRESS "$VNC_HOST"
+  exec vncviewer $ARGS -encodings "$ENC" -depth $DEPTH -quality $QUALITY -compresslevel $COMPRESS "$VNC_HOST"
 fi
 START
 
 chmod 0755 /home/pi/autovnc/start-vnc.sh
 chown -R pi:pi /home/pi/autovnc
-
-echo "==> [apply] start-vnc.sh aktualisiert."
 EOF
 
 chmod 0755 "$APPLY"
 chown root:root "$APPLY"
 
 # ----------------------------------------------------------
-# WebUI (Flask, lokal 127.0.0.1:8080) + BasicAuth
+# WebUI: app.py (Auflösung + Theme/Farben + Perf)
 # ----------------------------------------------------------
 CREDS="/opt/autovnc/web/creds.env"
 cat >"$CREDS" <<EOF
@@ -372,239 +333,262 @@ REBOOT_FLAG="/opt/autovnc/reboot_required"
 
 app = Flask(__name__)
 
+THEMES = {
+    "light":  {"bg":"#ffffff","fg":"#111111","accent":"#2a7fff"},
+    "dark":   {"bg":"#111111","fg":"#eeeeee","accent":"#4ea3ff"},
+    "blue":   {"bg":"#0b1c2d","fg":"#e6f0ff","accent":"#3fa9f5"},
+}
+
 def load_creds():
-    user="admin"; pw="admin123"
+    u="admin"; p="admin123"
     try:
-        with open(CREDS,"r",encoding="utf-8") as f:
-            for line in f:
-                if line.startswith("WEBUI_USER="): user=line.strip().split("=",1)[1]
-                if line.startswith("WEBUI_PASS="): pw=line.strip().split("=",1)[1]
-    except:
-        pass
-    return user, pw
+        for l in open(CREDS):
+            if l.startswith("WEBUI_USER="): u=l.split("=",1)[1].strip()
+            if l.startswith("WEBUI_PASS="): p=l.split("=",1)[1].strip()
+    except: pass
+    return u,p
 
 def authed():
-    h = request.headers.get("Authorization","")
+    h=request.headers.get("Authorization","")
     if not h.lower().startswith("basic "): return False
     try:
-        raw = base64.b64decode(h.split(" ",1)[1].strip()).decode("utf-8")
-        u,p = raw.split(":",1)
-        user,pw = load_creds()
-        return (u==user and p==pw)
+        raw=base64.b64decode(h.split(" ",1)[1]).decode()
+        u,p=raw.split(":",1)
+        U,P=load_creds()
+        return u==U and p==P
     except:
         return False
 
-def require_auth():
-    return Response("Auth required",401,{"WWW-Authenticate":'Basic realm="AutoVNC"'})
+def need_auth():
+    return Response("Auth required",401,{"WWW-Authenticate":"Basic realm=AutoVNC"})
 
 def read_cfg():
-    with open(CFG,"r",encoding="utf-8") as f:
-        return json.load(f)
+    return json.load(open(CFG))
 
-def write_cfg(cfg):
-    with open(CFG,"w",encoding="utf-8") as f:
-        json.dump(cfg,f,indent=2)
+def write_cfg(c):
+    json.dump(c,open(CFG,"w"),indent=2)
 
-def reboot_required():
+def theme_css(cfg):
+    t = cfg.get("ui_theme","dark")
+    if t == "custom":
+        bg = cfg.get("ui_bg","#111111")
+        fg = cfg.get("ui_fg","#eeeeee")
+        ac = cfg.get("ui_accent","#4ea3ff")
+    else:
+        d = THEMES.get(t, THEMES["dark"])
+        bg,fg,ac = d["bg"],d["fg"],d["accent"]
+
+    return f"""
+    body {{
+      background:{bg};
+      color:{fg};
+      font-family:system-ui,-apple-system,sans-serif;
+      max-width:900px;
+      margin:20px auto;
+      padding:0 14px;
+    }}
+    input,select,button {{
+      background:{bg};
+      color:{fg};
+      border:1px solid {ac};
+      padding:10px;
+      margin:6px 0 14px 0;
+      width:100%;
+      border-radius:10px;
+    }}
+    button {{
+      background:{ac};
+      color:#fff;
+      font-weight:700;
+      cursor:pointer;
+    }}
+    .row {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }}
+    .warn {{ background:#ffe8a1; color:#000; padding:10px; border-radius:10px; }}
+    h2,h3 {{ margin: 10px 0; }}
+    """
+
+def reboot_needed():
     return os.path.exists(REBOOT_FLAG)
 
-PAGE = """
+def sel(v, cur): return "selected" if str(v)==str(cur) else ""
+
+@app.route("/", methods=["GET"])
+def index():
+    if not authed(): return need_auth()
+    c=read_cfg()
+    css=theme_css(c)
+
+    reboot_block = ""
+    if reboot_needed():
+        reboot_block = """
+        <div class="warn">
+          <b>Reboot erforderlich</b> (HDMI-Auflösung wurde geändert).<br/>
+          <form method="post" action="/reboot" style="margin-top:10px">
+            <button type="submit">Jetzt neu starten</button>
+          </form>
+        </div>
+        """
+
+    out_mode = c.get("output_mode","720p")
+    ui_theme = c.get("ui_theme","dark")
+    enc = c.get("vnc_encodings","stable")
+    depth = c.get("vnc_depth",16)
+
+    return f"""
 <!doctype html>
 <html><head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>AutoVNC Config</title>
-<style>
-body{{font-family:system-ui,-apple-system,sans-serif;max-width:900px;margin:20px auto;padding:0 14px}}
-.row{{display:grid;grid-template-columns:1fr 1fr;gap:12px}}
-input,select{{width:100%;padding:10px;margin:6px 0 14px 0}}
-.ok{{background:#e8ffe8;padding:10px;border:1px solid #b4f0b4;border-radius:10px}}
-.warn{{background:#fff3cd;padding:10px;border:1px solid #ffe69c;border-radius:10px}}
-.small{{color:#555}}
-button{{padding:12px;width:100%}}
-hr{{margin:18px 0}}
-</style></head>
-<body>
-<h2>AutoVNC Konfiguration (Linux → RPi1 → HDMI)</h2>
-<p class="small">
-VNC Host ist die IP/Hostname deines Linux-Laptops. Dort muss ein VNC-Server auf Port 5900 laufen.
-</p>
-{msg}
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AutoVNC</title>
+<style>{css}</style>
+</head><body>
+
+<h2>AutoVNC (Linux → RPi1 → HDMI)</h2>
+
 <form method="post" action="/save">
+
 <h3>WLAN</h3>
 <div class="row">
-  <div><label>Land</label><input name="wifi_country" value="{wifi_country}"/></div>
-  <div><label>Start-Verzögerung (Sek.)</label><input name="wait_after_boot" value="{wait_after_boot}"/></div>
+  <div><label>Land</label><input name="wifi_country" value="{c.get("wifi_country","DE")}"></div>
+  <div><label>Start-Delay (Sek.)</label><input name="wait_after_boot" value="{c.get("wait_after_boot",20)}"></div>
 </div>
-<label>SSID</label><input name="wifi_ssid" value="{wifi_ssid}"/>
-<label>Passwort</label><input name="wifi_pass" value="{wifi_pass}"/>
+<label>SSID</label><input name="wifi_ssid" value="{c.get("wifi_ssid","")}">
+<label>WLAN Passwort</label><input name="wifi_pass" value="{c.get("wifi_pass","")}">
 
-<h3>HDMI / Auflösung</h3>
-<label>Output Mode (Reboot erforderlich)</label>
+<h3>HDMI Auflösung</h3>
 <select name="output_mode">
-  <option value="720p" {om_720}>720p (1280x720) – empfohlen</option>
-  <option value="1080p" {om_1080}>1080p (1920x1080) – evtl. langsam auf Pi1</option>
+  <option value="720p" {sel("720p", out_mode)}>720p (empfohlen)</option>
+  <option value="1080p" {sel("1080p", out_mode)}>1080p (experimentell)</option>
 </select>
 
 <h3>VNC</h3>
-<label>VNC Host (Linux Laptop IP/Hostname)</label><input name="vnc_host" value="{vnc_host}"/>
+<label>VNC Host (Linux-IP/Hostname)</label>
+<input name="vnc_host" value="{c.get("vnc_host","")}">
 
-<label>VNC Passwort (wird auf dem Pi als Datei gespeichert)</label>
-<input name="vnc_pass" value="{vnc_pass}" placeholder="leer = nicht empfohlen"/>
+<label>VNC Passwort</label>
+<input name="vnc_pass" value="{c.get("vnc_pass","")}">
 
 <div class="row">
   <div>
     <label>Fullscreen</label>
     <select name="vnc_fullscreen">
-      <option value="true" {fs_t}>true</option>
-      <option value="false" {fs_f}>false</option>
+      <option value="true" {sel("true", "true" if c.get("vnc_fullscreen",True) else "false")}>true</option>
+      <option value="false" {sel("false", "true" if c.get("vnc_fullscreen",True) else "false")}>false</option>
     </select>
   </div>
   <div>
     <label>ViewOnly</label>
     <select name="vnc_viewonly">
-      <option value="true" {vo_t}>true</option>
-      <option value="false" {vo_f}>false</option>
+      <option value="true" {sel("true", "true" if c.get("vnc_viewonly",True) else "false")}>true</option>
+      <option value="false" {sel("false", "true" if c.get("vnc_viewonly",True) else "false")}>false</option>
+    </select>
+  </div>
+</div>
+
+<h3>VNC Performance</h3>
+<div class="row">
+  <div>
+    <label>Color depth</label>
+    <select name="vnc_depth">
+      <option value="16" {sel("16", depth)}>16 (schneller)</option>
+      <option value="24" {sel("24", depth)}>24 (besseres Bild)</option>
+    </select>
+  </div>
+  <div>
+    <label>Encodings</label>
+    <select name="vnc_encodings">
+      <option value="stable" {sel("stable", enc)}>stable (empfohlen)</option>
+      <option value="raw-fast" {sel("raw-fast", enc)}>raw-fast (LAN, viel Bandbreite)</option>
+      <option value="tight-best" {sel("tight-best", enc)}>tight-best (WLAN, mehr CPU)</option>
     </select>
   </div>
 </div>
 
 <div class="row">
-  <div><label>Quality (0..9)</label><input name="vnc_quality" value="{vnc_quality}"/></div>
-  <div><label>Compress (0..9)</label><input name="vnc_compress" value="{vnc_compress}"/></div>
+  <div><label>Quality (0..9)</label><input name="vnc_quality" value="{c.get("vnc_quality",3)}"></div>
+  <div><label>Compress (0..9)</label><input name="vnc_compress" value="{c.get("vnc_compress",6)}"></div>
 </div>
+
+<h3>WebUI Farben</h3>
+<label>Theme</label>
+<select name="ui_theme">
+  <option value="light" {sel("light", ui_theme)}>Light</option>
+  <option value="dark" {sel("dark", ui_theme)}>Dark</option>
+  <option value="blue" {sel("blue", ui_theme)}>Blue</option>
+  <option value="custom" {sel("custom", ui_theme)}>Custom</option>
+</select>
+
+<div class="row">
+  <div><label>BG (Custom)</label><input name="ui_bg" value="{c.get("ui_bg","#111111")}"></div>
+  <div><label>FG (Custom)</label><input name="ui_fg" value="{c.get("ui_fg","#eeeeee")}"></div>
+</div>
+<label>Accent (Custom)</label><input name="ui_accent" value="{c.get("ui_accent","#4ea3ff")}">
 
 <button type="submit">Speichern & Anwenden</button>
 </form>
 
 {reboot_block}
 
-<hr/>
-<p class="small">
-WebUI läuft intern auf 127.0.0.1:8080, außen via HTTPS über Nginx.
-</p>
 </body></html>
 """
 
-@app.route("/", methods=["GET"])
-def index():
-    if not authed(): return require_auth()
-    cfg=read_cfg()
-
-    reboot_block = ""
-    if reboot_required():
-        reboot_block = """
-        <div class="warn">
-          <b>Reboot erforderlich</b> (Auflösung/HDMI wurde geändert).<br/>
-          <form method="post" action="/reboot" style="margin-top:10px">
-            <button type="submit">Jetzt neu starten</button>
-          </form>
-        </div>
-        """
-
-    return PAGE.format(
-        msg="",
-        wifi_country=cfg.get("wifi_country","DE"),
-        wifi_ssid=cfg.get("wifi_ssid",""),
-        wifi_pass=cfg.get("wifi_pass",""),
-        vnc_host=cfg.get("vnc_host",""),
-        vnc_pass=cfg.get("vnc_pass",""),
-        vnc_quality=str(cfg.get("vnc_quality",4)),
-        vnc_compress=str(cfg.get("vnc_compress",5)),
-        wait_after_boot=str(cfg.get("wait_after_boot",20)),
-        fs_t="selected" if cfg.get("vnc_fullscreen",True) else "",
-        fs_f="selected" if not cfg.get("vnc_fullscreen",True) else "",
-        vo_t="selected" if cfg.get("vnc_viewonly",True) else "",
-        vo_f="selected" if not cfg.get("vnc_viewonly",True) else "",
-        om_720="selected" if cfg.get("output_mode","720p")=="720p" else "",
-        om_1080="selected" if cfg.get("output_mode","720p")=="1080p" else "",
-        reboot_block=reboot_block
-    )
-
 @app.route("/save", methods=["POST"])
 def save():
-    if not authed(): return require_auth()
-    cfg=read_cfg()
+    if not authed(): return need_auth()
+    c=read_cfg()
 
-    cfg["wifi_country"]=request.form.get("wifi_country","DE").strip() or "DE"
-    cfg["wifi_ssid"]=request.form.get("wifi_ssid","").strip()
-    cfg["wifi_pass"]=request.form.get("wifi_pass","")
+    c["wifi_country"] = (request.form.get("wifi_country","DE").strip() or "DE")
+    c["wifi_ssid"] = request.form.get("wifi_ssid","").strip()
+    c["wifi_pass"] = request.form.get("wifi_pass","")
 
-    cfg["output_mode"]=request.form.get("output_mode","720p").strip() or "720p"
+    c["output_mode"] = (request.form.get("output_mode","720p").strip() or "720p")
 
-    cfg["vnc_host"]=request.form.get("vnc_host","").strip()
-    cfg["vnc_pass"]=request.form.get("vnc_pass","")
+    c["vnc_host"] = request.form.get("vnc_host","").strip()
+    c["vnc_pass"] = request.form.get("vnc_pass","")
 
-    cfg["vnc_fullscreen"]=(request.form.get("vnc_fullscreen","true")=="true")
-    cfg["vnc_viewonly"]=(request.form.get("vnc_viewonly","true")=="true")
+    c["vnc_fullscreen"] = (request.form.get("vnc_fullscreen","true")=="true")
+    c["vnc_viewonly"] = (request.form.get("vnc_viewonly","true")=="true")
 
-    try: cfg["vnc_quality"]=int(request.form.get("vnc_quality","4"))
-    except: cfg["vnc_quality"]=4
+    try: c["vnc_depth"] = int(request.form.get("vnc_depth","16"))
+    except: c["vnc_depth"] = 16
 
-    try: cfg["vnc_compress"]=int(request.form.get("vnc_compress","5"))
-    except: cfg["vnc_compress"]=5
+    c["vnc_encodings"] = request.form.get("vnc_encodings","stable")
 
-    try: cfg["wait_after_boot"]=int(request.form.get("wait_after_boot","20"))
-    except: cfg["wait_after_boot"]=20
+    try: c["vnc_quality"] = int(request.form.get("vnc_quality","3"))
+    except: c["vnc_quality"] = 3
 
-    write_cfg(cfg)
+    try: c["vnc_compress"] = int(request.form.get("vnc_compress","6"))
+    except: c["vnc_compress"] = 6
 
-    msg=""
-    try:
-        subprocess.run([APPLY], check=False)
-        msg='<div class="ok">Gespeichert & angewendet. WLAN/VNC/HDMI wurde aktualisiert.</div>'
-    except Exception as e:
-        msg=f'<div class="warn">Gespeichert, aber Apply-Fehler: {e}</div>'
+    try: c["wait_after_boot"] = int(request.form.get("wait_after_boot","20"))
+    except: c["wait_after_boot"] = 20
 
-    # Reboot block einfügen
-    reboot_block = ""
-    if reboot_required():
-        reboot_block = """
-        <div class="warn">
-          <b>Reboot erforderlich</b> (Auflösung/HDMI wurde geändert).<br/>
-          <form method="post" action="/reboot" style="margin-top:10px">
-            <button type="submit">Jetzt neu starten</button>
-          </form>
-        </div>
-        """
+    c["ui_theme"] = request.form.get("ui_theme","dark").strip() or "dark"
+    c["ui_bg"] = request.form.get("ui_bg", c.get("ui_bg","#111111"))
+    c["ui_fg"] = request.form.get("ui_fg", c.get("ui_fg","#eeeeee"))
+    c["ui_accent"] = request.form.get("ui_accent", c.get("ui_accent","#4ea3ff"))
 
-    cfg=read_cfg()
-    return PAGE.format(
-        msg=msg,
-        wifi_country=cfg.get("wifi_country","DE"),
-        wifi_ssid=cfg.get("wifi_ssid",""),
-        wifi_pass=cfg.get("wifi_pass",""),
-        vnc_host=cfg.get("vnc_host",""),
-        vnc_pass=cfg.get("vnc_pass",""),
-        vnc_quality=str(cfg.get("vnc_quality",4)),
-        vnc_compress=str(cfg.get("vnc_compress",5)),
-        wait_after_boot=str(cfg.get("wait_after_boot",20)),
-        fs_t="selected" if cfg.get("vnc_fullscreen",True) else "",
-        fs_f="selected" if not cfg.get("vnc_fullscreen",True) else "",
-        vo_t="selected" if cfg.get("vnc_viewonly",True) else "",
-        vo_f="selected" if not cfg.get("vnc_viewonly",True) else "",
-        om_720="selected" if cfg.get("output_mode","720p")=="720p" else "",
-        om_1080="selected" if cfg.get("output_mode","720p")=="1080p" else "",
-        reboot_block=reboot_block
-    )
+    write_cfg(c)
+    subprocess.run([APPLY], check=False)
+    return Response("OK", 302, {"Location": "/"})
 
 @app.route("/reboot", methods=["POST"])
 def do_reboot():
-    if not authed(): return require_auth()
+    if not authed(): return need_auth()
     try:
         subprocess.Popen(["/usr/sbin/reboot"])
     except:
         pass
-    return Response("Rebooting...", 200, {"Content-Type": "text/plain"})
+    return Response("Rebooting...", 200, {"Content-Type":"text/plain"})
 
-if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=8080)
+if __name__=="__main__":
+    app.run("127.0.0.1", 8080)
 EOF
 
 chmod 0644 "$APP"
 chown root:root "$APP"
 
-# systemd service für WebUI
+# systemd web service
 WEB_SERVICE="/etc/systemd/system/autovnc-web.service"
 cat >"$WEB_SERVICE" <<EOF
 [Unit]
@@ -613,8 +597,8 @@ After=network.target
 
 [Service]
 Type=simple
-EnvironmentFile=$CREDS
-ExecStart=/usr/bin/python3 $APP
+EnvironmentFile=/opt/autovnc/web/creds.env
+ExecStart=/usr/bin/python3 /opt/autovnc/web/app.py
 Restart=always
 RestartSec=3
 
@@ -626,13 +610,10 @@ systemctl daemon-reload
 systemctl enable autovnc-web.service >/dev/null 2>&1 || true
 systemctl restart autovnc-web.service >/dev/null 2>&1 || true
 
-# ----------------------------------------------------------
-# HTTPS via Nginx (Self-signed)
-# ----------------------------------------------------------
+# nginx https
 CRT="/etc/nginx/ssl/autovnc.crt"
 KEY="/etc/nginx/ssl/autovnc.key"
 if [[ ! -f "$CRT" || ! -f "$KEY" ]]; then
-  echo "==> Self-signed Zertifikat erzeugen..."
   openssl req -x509 -nodes -days 825 -newkey rsa:2048 \
     -keyout "$KEY" -out "$CRT" -subj "/CN=autovnc.local" >/dev/null 2>&1 || true
   chmod 600 "$KEY"
@@ -646,11 +627,9 @@ server {
   server_name _;
   return 301 https://$host$request_uri;
 }
-
 server {
   listen 443 ssl;
   server_name _;
-
   ssl_certificate     /etc/nginx/ssl/autovnc.crt;
   ssl_certificate_key /etc/nginx/ssl/autovnc.key;
 
@@ -669,11 +648,7 @@ nginx -t
 systemctl enable nginx >/dev/null 2>&1 || true
 systemctl restart nginx >/dev/null 2>&1 || true
 
-# ----------------------------------------------------------
-# GUI: Autologin + Openbox Autostart
-# ----------------------------------------------------------
-echo "==> GUI Autologin + Openbox Autostart..."
-
+# GUI autologin + openbox autostart
 systemctl set-default graphical.target >/dev/null 2>&1 || true
 
 mkdir -p /etc/lightdm/lightdm.conf.d
@@ -699,15 +674,8 @@ chmod 0644 /home/pi/.config/openbox/autostart
 
 systemctl enable lightdm >/dev/null 2>&1 || true
 
-# initial apply
-echo "==> Initial apply_config..."
+echo "==> Initial apply..."
 bash "$APPLY" || true
 
-echo
-echo "=================================================="
-echo "FERTIG ✅"
-echo "WebUI (HTTPS): https://<PI-IP>"
-echo "Login: $WEBUI_USER / $WEBUI_PASS"
-echo "Hinweis: Nach Änderung der Auflösung ist ein Reboot nötig."
-echo "=================================================="
+echo "FERTIG ✅  WebUI: https://<PI-IP>  Login: $WEBUI_USER / $WEBUI_PASS"
 
