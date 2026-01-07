@@ -161,4 +161,7 @@ Konfigurierbar:
 
 ## 📜 Lizenz
 
-MIT License – freie Nutzung & Anpassung.
+This project is licensed under the
+Creative Commons Attribution-NonCommercial-ShareAlike 4.0 (CC BY-NC-SA 4.0).
+Commercial use is not permitted.
+
